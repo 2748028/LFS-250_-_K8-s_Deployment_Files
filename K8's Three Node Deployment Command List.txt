@@ -1,0 +1,301 @@
+### BEGIN CLEAN INSTALLATION OF CENTOS 7 ###
+
+sudo yum check-update #Equiv to apt update
+
+sudo yum clean all #Clean out all of the old un-needed repo info
+
+sudo reboot #Start the machine in a "clean" state
+
+sudo yum update #Updates all applicable packages on the machine
+
+sudo hostnamectl set-hostname k8smaster #On control plane node
+
+sudo hostnamectl set-hostname k8sworker1#On node one
+
+sudo hostnamectl set-hostname k8sworker2 #On node two
+
+sudo vi /etc/sysconfig/network-scripts/ifcfg-ens33 #Int name may change upon os install but the concept remains the same; this must be performed on every node in the cluster.
+
+TYPE="Ethernet"
+PROXY_METHOD="none"
+BROWSER_ONLY="no"
+BOOTPROTO="none"
+IPADDR=XXX.XXX.XXX.XXX #Static IP address of the node, depends on the deployed network.
+PREFIX=24 #See above.
+GATEWAY=XXX.XXX.XXX.XXX #See above.
+DNS1=8.8.8.8 #Not ideal but this works in place of having to t-shoot DNS issues on top of pod issues.
+DNS2=8.8.4.4 #See above.
+DEFROUTE="yes"
+IPV4_FAILURE_FATAL="no"
+IPV6INIT="no" #Just going to disable IPv6 for simplicity sake.
+IPV6_AUTOCONF="no" 
+IPV6_DEFROUTE="no"
+IPV6_FAILURE_FATAL="no"
+IPV6_ADDR_GEN_MODE="stable-privacy"
+NAME="ens33" #Again depends upon your installation.
+UUID="Your respective network UUID"
+DEVICE="ens33"
+ONBOOT="yes"
+
+systemctl restart network
+
+cat << EOF >> /etc/hosts #This must be run on every node in the cluster.
+
+192.168.2.164 k8smaster
+192.168.2.165 k8sworker1
+192.168.2.166 k8sworker2
+
+EOF
+
+setenforce 0 #DIsables SELINUX, again not ideal in a production environment we are just saving ourselves t-shoot time.
+
+sed -i --follow-symlinks 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/sysconfig/selinux
+
+cat << EOF > /etc/yum.repos.d/kubernetes.repo
+[kubernetes]
+name=Kubernetes
+baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+enabled=1
+gpgcheck=0 #Disabled the GPG check as the repo kept failing EXTREMELY DANGEROUS just did not have the time to t-shoot this to completion.
+repo_gpgcheck=1
+gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+EOF
+
+sudo yum install -y yum-utils
+
+sudo yum-config-manager \
+    --add-repo \
+    https://download.docker.com/linux/centos/docker-ce.repo #Adds the most recent Docker repo; rcommended repo on the course was aged and caused CRI interaction issues.
+
+sudo yum install docker-ce docker-ce-cli containerd.io docker-compose-plugin kubeadm #Going to be using "kubeadm" for this deploy as it is industry standard.
+
+sudo systemctl enable docker.service #Set Docker to start on boot.
+
+sudo systemctl start docker #Ensures Docker starts.
+
+sudo systemctl enable containerd.service #Set containered to start on boot.
+
+sudo systemctl start containerd
+
+sudo systemctl enable kubelet
+
+sudo systemctl start kubelet
+
+sudo swapoff -a #Disable storage swap. To keep it brief this will cause all sorts of strange errors if it remains enabled.
+
+sudo vi /etc/fstab #Comment out the swap keyword section.
+
+### PLEASE NOTE UP TO THIS POINT ALL OF THE ABOVE COMMANDS WERE APPLICABLE TO ALL THREE HOSTS. THE FOLLOWING COMMANDS ONLY APPLY TO THE CONTROL PLANE NODE ###
+
+sudo kubeadm init #This initializes our cluster control; if something is going to fail it will be here.
+
+sudo mkdir -p $HOME/.kube #Post init action.
+
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config #Post init action.
+
+sudo chown (id -g) $HOME/.kube/config #Post init action.
+
+sudo curl https://docs.projectcalico.org/manifests/calico.yaml -O #Copying over the "calico.yaml" config file we will use to setup pod networking.
+
+sudo kubectl apply -f calico.yaml
+
+kubectl get pods -n kube-system #Wait untill all nodes read status "Running" before continuing.
+
+sudo kubeadm join 192.168.0.xxx:6443 --token XXX
+--discovery-token-ca-cert-hash sha256:XX #This command must be run on each of the worker nodes. This command will join the workers to the control plane node. This command is only valid for 24 hours.
+
+### END BASIC K8'S THREE NODE CLUSTER ON CENTOS 7 USING KUBEADM ###
+
+sudo kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.6.1/aio/deploy/recommended.yaml #Deploy the official Kubernetes web-GUI dashboard.
+
+sudo kubectl proxy --accept-hosts=^192\.168\.2\.*$ --port=8001 --accept-paths='^.*' --address='192.168.2.164' & #Allows members of the 192.168.2.0/24 subnet to access the Kubernetes Web-GUI.
+
+sudo nano pod.yaml #Creating our first pod.
+
+### FILE ###
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.20
+    ports:
+    - containerPort: 80	
+
+### END FILE ###
+
+kubectl create -f pod.yaml #This will "compile" a pod image based on our specifications.
+
+kubectl get pod #This command displays the presently running pods and their age.
+
+kubectl delete pod nginx #Deletes the deployed pod in our current namespace.
+
+### FILE ###
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx-with-sidecar
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.19
+    ports:
+    - containerPort: 80
+  - name: count
+    image: busybox:1.34
+    args: [/bin/sh, -c,
+            'i=0; while true; do echo "$i: $(date)"; i=$((i+1)); sleep 1; done']
+			
+### END FILE ###
+
+### FILE ###
+
+# ==============================================================
+# Example YAML values for typical kubeview deployment scenarios
+# ==============================================================
+
+# If true the app will function in single namespace mode
+limitNamespace: false
+
+# Networking - expose using an ingress
+# Note. If both ingress and loadbalancer are disabled, an internal ClusterIP service will be created
+ingress:
+  enabled: true
+    className: nginx
+    hosts:
+      - host: 192.168.2.164
+    tls:
+     - secretName: my-cert
+       hosts:
+         - 192.168.2.164
+
+# Networking - expose using simple load balancer
+loadBalancer:
+  enabled: false
+  # If you have an existing IP you can set it here
+  # IP: "1.2.3.4"
+
+### END FILE ###
+
+git clone https://github.com/benc-uk/kubeview #Cloning the kubeview project to our local machine.
+
+cd kubeview/charts/ 
+
+curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 #Get the Helm installation script.
+
+chmod 700 get_helm.sh #Make it executible.
+
+./get_helm.sh #Install helm.
+
+helm install kubeview kubeview #Installing the kubeview extension using heml. The K8's package manager.
+
+kubectl port-forward svc/kubeview -n default 80:80 #Expose the Kubeview service.
+
+sudo yum -y groups install "GNOME Desktop" #Installing the desktop GUI.
+
+echo "exec gnome-session" >> ~/.xinitrc #TEll the OS what desktop environment we prefer.
+
+startx #Start Gnome.
+
+### FILE ReplicaSet.yaml ###
+
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: frontend
+  labels:
+    app: guestbook
+    tier: frontend
+spec:
+  # modify replicas according to your case
+  replicas: 3
+  selector:
+    matchLabels:
+      tier: frontend
+  template:
+    metadata:
+      labels:
+        tier: frontend
+    spec:
+      containers:
+      - name: php-redis
+        image: gcr.io/google_samples/gb-frontend:v3
+
+### END FILE ###
+
+kubectl create -f replicaset.yaml #Used a different .yaml over the video as his formatting was incorrect.
+
+kubectl scale --replicas=8 rs/frontend #This command will scale out our "frontend" app up to 8 pods.
+
+kubectl scale --replicas=2 rs/frontend
+
+### FILE Deployment Set ###
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+  labels:
+    app: nginx
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.14.2
+        ports:
+        - containerPort: 80
+		
+### FILE END ###
+
+kubectl scale --replicas=10 deployment/nginx #Lets get silly.
+
+nano deployment2.yaml
+
+### FILE Deployment Two ###
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echoserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echoserver
+  template:
+    metadata:
+      labels:
+        app: echoserver
+    spec:
+      containers:
+      - image: gcr.io/google_containers/echoserver:1.0
+        imagePullPolicy: Always
+        name: echoserver
+        ports:
+        - containerPort: 8080
+
+### END FILE ###
+
+kubectl create -f deployment2.yaml #Create a base echoserver Pod.
+
+kubectl get pods -o wide #This will show us the IPs of the Pods before we add the service.
+
+kubectl expose deployment echoserver --port=8080 #This command exposes our echoserver 
+
+kubectl get svc #This command shows the cluster IP of a given deployment of pods.
+
+watch curl 10.103.126.221:8080 #Using this command we can see that each successive curl request gets sent to a different Pod.
+
+
